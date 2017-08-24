@@ -1,6 +1,9 @@
 # pipeline run directory
 run/*
 
+#notebook checkpoints
+notebooks/.ipynb_checkpoints/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
