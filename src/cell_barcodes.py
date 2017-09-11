@@ -679,6 +679,32 @@ def group10X(infile, outfile):
 
     P.run()
 
+@transform(AssignGenes10X,
+           regex("(\S+)_hg_mm.bam.featureCounts.bam"),
+           r"\1_hg_mm_dedup.bam")
+def UMIToolsDedup10X(infile, outfile):
+    '''
+    run UMI-tools dedup to get the UMI groups per gene per cell
+    '''
+
+    tmpfile = P.getTempDir()
+    outfile_base = os.path.basename(outfile)
+
+    statement = '''
+    samtools sort %(infile)s -o %(tmpfile)s/%(outfile_base)s; checkpoint ;
+    samtools index %(tmpfile)s/%(outfile_base)s; checkpoint ;
+    umi_tools dedup -I %(tmpfile)s/%(outfile_base)s
+    --per-cell --per-gene --gene-tag=XT
+    --group-out=%(outfile)s.tsv
+    --log=%(outfile)s.log
+    --no-sort-output
+    --output-stats=%(outfile)s_stats
+    > %(outfile)s; checkpoint ;
+    samtools index %(outfile)s ;
+    '''
+
+    P.run()
+
 
 ##############################################################################
 #  Deduplicate
