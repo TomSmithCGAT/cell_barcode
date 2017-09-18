@@ -223,8 +223,7 @@ TENX_CELLS_LOOKUP = {"100":"100",
                      "12k":"12000"}
 TENX_REV_CELLS_LOOKUP = {y:x for x,y in TENX_CELLS_LOOKUP.items()}
 
-@mkdir('raw')
-@mkdir('raw/10X_fastqs/')
+@mkdir('raw', 'raw/10X_fastqs/')
 @originate(['raw/10X_fastqs/hgmm_%s.fastq.1.gz' % TENX_CELLS_LOOKUP[x]
             for x in TENX_DATASETS])
 def download10x(outfile):
@@ -564,6 +563,8 @@ def STARIndexMergedGenomes(infiles, outfile):
     outfile_base = outfile.replace(".1.ht2l", "")
     strIndexPath = os.path.dirname(outfile)
 
+    job_memory = "60G"
+
     statement = '''
     mkdir %(strIndexPath)s; checkpoint; 
     STAR --runMode genomeGenerate
@@ -571,7 +572,7 @@ def STARIndexMergedGenomes(infiles, outfile):
     --genomeDir %(strIndexPath)s
     --outFileNamePrefix %(strIndexPath)s
     --genomeFastaFiles %(genome)s
-    --limitGenomeGenerateRAM 20000000000
+    --limitGenomeGenerateRAM 60000000000
     --genomeChrBinNbits 12
     --sjdbGTFfile %(gtf)s
     --sjdbOverhang %(star_tx_overhang)s'''
