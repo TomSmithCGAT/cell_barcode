@@ -215,8 +215,8 @@ def downloadInDrop(outfile):
 
 
 #TENX_DATASETS=["100", "1k", "6k"]
-#TENX_DATASETS=["100"] # restrict to 100 for testing
-TENX_DATASETS=["100", "1k"] # restrict to 100 & 1k for testing
+TENX_DATASETS=["100"] # restrict to 100 for testing
+#TENX_DATASETS=["100", "1k"] # restrict to 100 & 1k for testing
 TENX_CELLS_LOOKUP = {"100":"100",
                      "1k":"1000",
                      "6k":"6000",
@@ -675,6 +675,7 @@ def group10X(infile, outfile):
     --no-sort-output
     > %(outfile)s; checkpoint ;
     samtools index %(outfile)s ;
+    rm -r %(tmpfile)s ;
     '''
 
     P.run()
@@ -695,12 +696,12 @@ def UMIToolsDedup10X(infile, outfile):
     samtools index %(tmpfile)s/%(outfile_base)s; checkpoint ;
     umi_tools dedup -I %(tmpfile)s/%(outfile_base)s
     --per-cell --per-gene --gene-tag=XT
-    --group-out=%(outfile)s.tsv
     --log=%(outfile)s.log
     --no-sort-output
     --output-stats=%(outfile)s_stats
     > %(outfile)s; checkpoint ;
     samtools index %(outfile)s ;
+    rm -r %(tmpfile)s ;
     '''
 
     P.run()
