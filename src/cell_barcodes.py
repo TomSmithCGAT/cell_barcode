@@ -97,6 +97,8 @@ import os
 import sqlite3
 import pysam
 import time
+import collections
+import CGAT.IOTools as IOTools
 
 # import pipeline decorators
 from ruffus import *
@@ -214,48 +216,61 @@ def downloadInDrop(outfile):
     P.run()
 
 
-#TENX_DATASETS=["100", "1k", "6k"]
-TENX_DATASETS=["100"] # restrict to 100 for testing
-#TENX_DATASETS=["100", "1k"] # restrict to 100 & 1k for testing
-TENX_CELLS_LOOKUP = {"100":"100",
-                     "1k":"1000",
-                     "6k":"6000",
-                     "12k":"12000"}
-TENX_REV_CELLS_LOOKUP = {y:x for x,y in TENX_CELLS_LOOKUP.items()}
+
+# need maps from sample to:
+# * cell ranger version - determine download url
+# * number of cells - whitelisting
+# * species - alignment and gene assignment tasks
+# this info is stored in sample_info in pipeline src dir.
+
+TENX2INFO = collections.defaultdict(lambda: collections.defaultdict())
+TENX_DATASETS = set()
+with IOTools.openFile(PARAMS['sample_info'], "r") as inf:
+    header = next(inf)
+    for line in inf:
+        sample_name, r_version, n_cells, species, seq_sat, chem = line.strip().split(",")
+        if chem == "v2":  # can't currently handle the v1 data (Where are the UMIs?!)
+            TENX_DATASETS.add(sample_name)
+            TENX2INFO[sample_name]["version"] = r_version
+            TENX2INFO[sample_name]["n_cells"] = n_cells
+            TENX2INFO[sample_name]["species"] = species
+            TENX2INFO[sample_name]["chem"] = chem
+
+#TENX_DATASETS=["hgmm_100", "neurons_900"] # restrict for testing
+
 
 @mkdir('raw', 'raw/10X_fastqs/')
-@originate(['raw/10X_fastqs/hgmm_%s.fastq.1.gz' % TENX_CELLS_LOOKUP[x]
-            for x in TENX_DATASETS])
+@originate(['raw/10X_fastqs/%s.fastq.1.gz' % x for x in TENX_DATASETS])
 def download10x(outfile):
     ''' Download the 10X data, untar, cat the fastqs and delete
     the unwanted files'''
 
-    n_cells = TENX_REV_CELLS_LOOKUP[
-        os.path.basename(outfile).split("_")[1].split(".")[0]]
-    tar_file = "hgmm_%s_fastqs.tar" % n_cells
-    tmp_dir = "10x_%s_fastqs" % n_cells
+    sample_name = os.path.basename(outfile).replace(".fastq.1.gz", "")
     
-    if n_cells in ["100", "1000"]:
-        url = "http://cf.10xgenomics.com/samples/cell-exp/1.3.0/hgmm_%s/%s" % (
-            n_cells, tar_file)
-    else:
-        url = "http://s3-us-west-2.amazonaws.com/10x.files/samples/cell-exp/2.0.1/hgmm_%s/%s" % (n_cells, tar_file)
+    ranger_version = TENX2INFO[sample_name]["version"]
 
+    tar_file = "%s_fastqs.tar" % sample_name
+
+    url = "http://s3-us-west-2.amazonaws.com/10x.files/samples/cell-exp/%s/%s/%s" % (
+        ranger_version, sample_name, tar_file)
+
+    tmp_dir = "10x_%s_fastqs" % sample_name
     outfile2 = outfile.replace(".fastq.1.gz", ".fastq.2.gz")
 
     statement = '''
     mkdir %(tmp_dir)s; checkpoint ;
     wget %(url)s; checkpoint ;
     tar -xf %(tar_file)s -C %(tmp_dir)s; checkpoint ;
-    cat %(tmp_dir)s/fastqs/hgmm_%(n_cells)s_S1_*_R1_001.fastq.gz
+    cat %(tmp_dir)s/*/%(sample_name)s_S1_*_R1_001.fastq.gz
     > %(outfile)s; checkpoint ;
-    cat %(tmp_dir)s/fastqs/hgmm_%(n_cells)s_S1_*_R2_001.fastq.gz
+    cat %(tmp_dir)s/*/%(sample_name)s_S1_*_R2_001.fastq.gz
     > %(outfile2)s; checkpoint ;
     rm -rf %(tmp_dir)s %(tar_file)s
 
     '''
-
     P.run()
+
+
 
 @follows(downloadDropSeq,
          downloadInDrop,
@@ -353,29 +368,10 @@ def ExtractInDrop(infile, outfile):
 def Make10XWhitelist(infile, outfile):
     'make a whitelist of "true" cell barcodes'
 
-    statement = '''
-    umi_tools whitelist 
-    --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN
-    --extract-method=string
-    --plot-prefix=%(outfile)s
-    -I %(infile)s
-    -L %(outfile)s.log
-    --subset-reads=50000000
-    -S %(outfile)s
-    '''
+    sample_name = os.path.basename(infile).replace(".fastq.1.gz", "")
 
-    P.run()
-
-
-@mkdir(("whitelist"))
-@transform(download10x,
-           regex("raw/10X_fastqs/(\S+).fastq.1.gz"),
-           r"whitelist/10X_\1_whitelist_set.tsv")
-def Make10XWhitelistSet(infile, outfile):
-    'make a whitelist of "true" cell barcodes'
-
-    n_cells = os.path.basename(infile).split("_")[1].split(".")[0]
-
+    n_cells = TENX2INFO[sample_name]["n_cells"]
+    
     statement = '''
     umi_tools whitelist 
     --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN
@@ -396,39 +392,8 @@ def Make10XWhitelistSet(infile, outfile):
 @transform(download10x,
            regex("raw/10X_fastqs/(\S+).fastq.1.gz"),
            add_inputs(r"whitelist/10X_\1_whitelist.tsv"),
-           r"extract/\1_extracted.fastq.gz")
+           r"extract/\1_extracted.fastq")
 def Extract10X(infiles, outfile):
-    'extract the umi and cell barcodes'
-    
-    infile, whitelist = infiles
-
-    infile2 = infile.replace("fastq.1.gz", "fastq.2.gz")
-
-    statement = '''
-    umi_tools extract 
-    --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN
-    --extract-method=string
-    -I %(infile)s
-    --read2-in=%(infile2)s
-    -L %(outfile)s.log
-    --filter-cell-barcode
-    --whitelist=%(whitelist)s
-    --subset-reads=10000000
-    --compresslevel=9
-    -S %(outfile)s
-    '''
-
-    P.run()
-
-
-
-@mkdir("extract")
-@follows(Make10XWhitelistSet)
-@transform(download10x,
-           regex("raw/10X_fastqs/(\S+).fastq.1.gz"),
-           add_inputs(r"whitelist/10X_\1_whitelist_set.tsv"),
-           r"extract/\1_extracted_set.fastq.gz")
-def Extract10XSet(infiles, outfile):
     '''extract the umi and cell barcodes using the whitelist defined
     using a manual threshold'''
     
@@ -445,21 +410,22 @@ def Extract10XSet(infiles, outfile):
     -L %(outfile)s.log
     --filter-cell-barcode
     --whitelist=%(whitelist)s
-    --compresslevel=9
     --read2-stdout
     -S %(outfile)s
     '''
 
     P.run()
-
+    IOTools.zapFile(infile)
+    IOTools.zapFile(infile2)
+    P.touch(outfile)
 
 @follows(MakeDropSeqWhitelist, MakeInDropWhitelist,
-         Make10XWhitelist, Make10XWhitelistSet)
+         Make10XWhitelist)
 def MakeWhitelists():
     pass
 
 @follows(ExtractDropSeq, ExtractInDrop,
-         Extract10X, Extract10XSet)
+         Extract10X)
 def Extract():
     pass
 
@@ -584,37 +550,48 @@ def STARIndexMergedGenomes(infiles, outfile):
 ##############################################################################
 
 @mkdir("mapped")
-@transform(Extract10XSet,
-           regex("extract/(\S+)_extracted_set.fastq.gz"),
+@transform(Extract10X,
+           regex("extract/(\S+)_extracted.fastq"),
            add_inputs(IndexMergedGenomes),
-           r"mapped/\1_hg_mm.bam")
+           r"mapped/\1.bam")
 def AlignToHumanMouse(infiles, outfile):
     '''
-    align 10X data to combined hg38 & mm10 genome
+    align 10X data to individual or combined hg38 & mm10 genome
     retain only the mapped, primary reads
     '''
 
-    infile, genome = infiles
-    genome = genome.replace(".1.ht2l", "")  
+    # combined_genome only req. for subset of infiles
+    infile, combined_genome = infiles
+
+    sample_name = os.path.basename(infile).replace("_extracted.fastq", "")
+    species = TENX2INFO[sample_name]["species"]
     
+    if species in ["mm", "hg"]:
+        if species == "mm":
+            species = "mm10"
+        elif species == "hg":
+            species = "hg38"
+        ref_genome = os.path.join(PARAMS["hisat_dir"], species)
+    else:
+        ref_genome = combined_genome.replace(".1.ht2l", "")  
+
     unsorted_bam = P.getTempFilename()
 
+    job_threads = 6
+    job_memory = "3.9G"
+
     statement = '''
-    hisat2 -x %(genome)s -U %(infile)s -k1 2>%(outfile)s.log |
+    hisat2 -x %(ref_genome)s -U %(infile)s -k1 --threads %(job_threads)s
+    2>%(outfile)s.log |
     samtools view -bS -F 4 -F 256 - > %(unsorted_bam)s; checkpoint ;
     samtools sort %(unsorted_bam)s -o %(outfile)s; checkpoint ; 
     samtools index %(outfile)s; checkpoint; 
     rm -f %(unsorted_bam)s'''
 
-    statement = '''
-    hisat2 -x %(genome)s -U %(infile)s -k10 2>%(outfile)s.log |
-    samtools view -bS -F 4 -F 256 - > %(outfile)s; '''
-
-    statement = '''
-    hisat2 -x %(genome)s -U %(infile)s -k10 2>%(outfile)s.log |
-    samtools view -bS -F 4 - > %(outfile)s; '''
     P.run()
 
+    IOTools.zapFile(infile)
+    P.touch(outfile)
 
 @follows(AlignToHumanMouse)
 def Align():
@@ -626,13 +603,11 @@ def Align():
 ##############################################################################
 
 @transform(AlignToHumanMouse,
-           regex("(\S+)_hg_mm.bam"),
+           regex("(\S+).bam"),
            add_inputs((PARAMS['geneset_hg'], PARAMS['geneset_mm'])),
-           r"\1_hg_mm.bam.featureCounts.bam")
+           r"\1.bam.featureCounts.bam")
 def AssignGenes10X(infiles, outfile):
     '''
-    align 10X data to combined hg38 & mm10 genome
-    retain only the mapped, primary reads
     '''
 
     infile, genesets = infiles
@@ -640,21 +615,51 @@ def AssignGenes10X(infiles, outfile):
 
     tmpgeneset = P.getTempFilename()
 
+    sample_name = os.path.basename(infile).replace(".bam", "")
+    species = TENX2INFO[sample_name]["species"]
+
+    if species == "hg":
+        statement = '''
+        zcat %(hg_geneset)s  > %(tmpgeneset)s; checkpoint ;
+        '''
+
+    elif species == "mm":
+        statement = '''
+        zcat %(mm_geneset)s  > %(tmpgeneset)s; checkpoint ;
+        '''
+
+    elif species == "hgmm":
+        statement = '''
+        zcat %(hg_geneset)s | sed 's/^chr/hg_chr/g' > %(tmpgeneset)s; checkpoint ;
+        zcat %(mm_geneset)s | sed 's/^chr/mm_chr/g' >> %(tmpgeneset)s; checkpoint ;
+        '''
+    
+    elif species == "ercc":
+        raise ValueError("pipeline can't handle ercc yet: %s" % sample_name)
+    
+    else:
+        raise ValueError("species not recognised for sample: %s" % sample_name)
+
+
     # -M assigns multimapped reads too
     # -R BAM outputs tagged BAM to "[INFILENAME].featurecounts.bam"
-    statement = '''
-    zcat %(hg_geneset)s | sed 's/^chr/hg_chr/g' > %(tmpgeneset)s; checkpoint ;
-    zcat %(mm_geneset)s | sed 's/^chr/mm_chr/g' >> %(tmpgeneset)s; checkpoint ;
+    statement += '''
     featureCounts -a %(tmpgeneset)s -M -R BAM -o %(outfile)s.txt %(infile)s
     > %(outfile)s.log; checkpoint; 
     rm -f %(tmpgeneset)s; '''
 
     P.run()
+    IOTools.zapFile(infile)
+    P.touch(outfile)
 
 
 ##############################################################################
 #  Group
 ##############################################################################
+
+# group command assumes all the mapping locations have been
+# retained. This is not the case currently! (DON'T RUN THE TASK
+# BELOW!)
 @transform(AssignGenes10X,
            regex("(\S+)_hg_mm.bam.featureCounts.bam"),
            r"\1_hg_mm_grouped.bam")
@@ -682,14 +687,14 @@ def group10X(infile, outfile):
     P.run()
 
 @transform(AssignGenes10X,
-           regex("(\S+)_hg_mm.bam.featureCounts.bam"),
-           r"\1_hg_mm_dedup.bam")
+           regex("(\S+).bam.featureCounts.bam"),
+           r"\1_dedup.bam")
 def UMIToolsDedup10X(infile, outfile):
     '''
     run UMI-tools dedup to get the UMI groups per gene per cell
     '''
 
-    tmpfile = P.getTempDir()
+    tmpfile = P.getTempDir(shared=True)
     outfile_base = os.path.basename(outfile)
 
     statement = '''
@@ -700,8 +705,7 @@ def UMIToolsDedup10X(infile, outfile):
     --log=%(outfile)s.log
     --no-sort-output
     --output-stats=%(outfile)s_stats
-    > %(outfile)s; checkpoint ;
-    samtools index %(outfile)s ;
+    > %(outfile)s; checkpoint; 
     rm -r %(tmpfile)s ;
     '''
 
@@ -745,7 +749,7 @@ def Add10XCBErrors(infile, outfile):
 
 
 @mkdir("add_cb_errors.dir")
-@transform(Extract10XSet,
+@transform(Extract10X,
            regex("extract/(\S+)_extracted_set.fastq.gz"),
            r"add_cb_errors.dir/\1_added_errors_high.fastq.gz")
 def Add10XCBErrorsHigh(infile, outfile): 
@@ -761,7 +765,7 @@ def Add10XCBErrorsHigh(infile, outfile):
 
 
 @mkdir("add_cb_errors.dir")
-@transform(Extract10XSet,
+@transform(Extract10X,
            regex("extract/(\S+)_extracted_set.fastq.gz"),
            r"add_cb_errors.dir/\1_added_errors_constant_low.fastq.gz")
 def Add10XCBErrorsConstantLow(infile, outfile): 
@@ -777,7 +781,7 @@ def Add10XCBErrorsConstantLow(infile, outfile):
     P.run()
 
 
-@transform(Extract10XSet,
+@transform(Extract10X,
            regex("extract/(\S+)_extracted_set.fastq.gz"),
            r"add_cb_errors.dir/\1_added_errors_constant_low.fastq.gz")
 def Add10XCBErrorsConstantHigh(infile, outfile): 
