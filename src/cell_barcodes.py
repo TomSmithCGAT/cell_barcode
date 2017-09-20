@@ -236,7 +236,8 @@ with IOTools.openFile(PARAMS['sample_info'], "r") as inf:
             TENX2INFO[sample_name]["species"] = species
             TENX2INFO[sample_name]["chem"] = chem
 
-#TENX_DATASETS=["hgmm_100", "neurons_900"] # restrict for testing
+# restrict for testing (pbmc8k has >700M reads! = 75GB fastqs!!)
+#TENX_DATASETS = [x for x in TENX_DATASETS if x != "pbmc8k"] 
 
 
 @mkdir('raw', 'raw/10X_fastqs/')
@@ -577,7 +578,7 @@ def AlignToHumanMouse(infiles, outfile):
 
     unsorted_bam = P.getTempFilename()
 
-    job_threads = 6
+    job_threads = 12
     job_memory = "3.9G"
 
     statement = '''
